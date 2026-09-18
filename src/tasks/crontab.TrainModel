@@ -1,2 +1,2 @@
-* * * * * /usr/local/bin/python3 /app/app.py -app TrainModel -r "01:00" >> /app/logs/output.txt 2>> /app/logs/errors.txt
-
+# Reentrena el modelo de genero musical todos los dias a la 01:00
+0 1 * * * /usr/local/bin/python3 /app/app.py -app TrainModel -r "01:00" >> /app/logs/output.txt 2>> /app/logs/errors.txt

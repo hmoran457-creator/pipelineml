@@ -49,3 +49,8 @@ __pycache__/
 # add .env file
 .env
 .DS_Store
+
+# artefactos generados por el entrenamiento
+assets/*.pkl
+assets/*.pkl.tmp
+!assets/.gitkeep

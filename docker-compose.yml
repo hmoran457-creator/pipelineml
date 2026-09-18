@@ -1,54 +1,51 @@
-version: '3'
-
 services:
   cron-train-model:
     container_name: train-model
+    build: .
     image: api-model:latest
     volumes:
-      - ./images:/app/images
-      - ./logs:/app/logs
-      - ./assets:/app/assets
-      - ./.env:/app/.env
-    env_file:
-      - ./.env
-    environment:
-      - CRON_FILE_NAME=TrainModel
-    logging:
-      driver: "json-file"
-      options:
-          max-size: "50m"
-          max-file: "2"
-
-
-  api:
-    container_name: api
-    image: api-model:latest
-    volumes:
-      - ./images:/app/images
       - ./logs:/app/logs
       - ./assets:/app/assets
       - ./src:/app/src
+      - ./.env:/app/.env:ro
+    env_file:
+      - ./.env
+    environment:
+      CRON_FILE_NAME: TrainModel
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "2"
+
+  api:
+    container_name: api
+    build: .
+    image: api-model:latest
+    depends_on:
+      - cron-train-model
+    volumes:
+      - ./logs:/app/logs
+      - ./assets:/app/assets
+      - ./src:/app/src
+      - ./.env:/app/.env:ro
     env_file:
       - ./.env
     environment:
       PORT: 8000
-      VIRTUAL_HOST: api.ralejandro.com
-      VIRTUAL_PORT: 8000
-      LETSENCRYPT_HOST: api.ralejandro.com
-      LETSENCRYPT_EMAIL: ralejandrobm@gmail.com
     ports:
       - '8000:8000'
-    restart: "always"
-    networks:
-      - web
-    command: [ "python", "app.py", "--app", "ApiApp" ]
+    restart: unless-stopped
+    command: ["python", "app.py", "--app", "ApiApp"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health-check').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     logging:
       driver: "json-file"
       options:
-          max-size: "50m"
-          max-file: "2"
-
-
-networks:
-  web:
-    external: true
+        max-size: "50m"
+        max-file: "2"

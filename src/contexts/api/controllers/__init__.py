@@ -1,2 +1,2 @@
 from .HealthCheckController import HealthCheckController
-from .TrainModelController import TrainModelController
+from .TrainModelController import TrainModelController, ModelInfoController

@@ -4,11 +4,16 @@ import uvicorn
 
 from src.contexts.api.controllers import HealthCheckController
 from src.contexts.api.controllers import TrainModelController
+from src.contexts.api.controllers import ModelInfoController
 
 
 class ApiApp:
     def __init__(self):
-        self.app = FastAPI()
+        self.app = FastAPI(
+            title="API Prediccion de Genero Musical",
+            description="Predice el genero musical de un cliente de la tienda a partir de su tipo de correo, pais y ciudad.",
+            version="1.0.0",
+        )
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -28,8 +33,14 @@ class ApiApp:
        
         self.app.add_api_route(
             "/api/model",
-            TrainModelController().execute, 
+            TrainModelController().execute,
             methods=["POST"],
+        )
+
+        self.app.add_api_route(
+            "/api/model/info",
+            ModelInfoController().execute,
+            methods=["GET"],
         )
 
     def start(self):
