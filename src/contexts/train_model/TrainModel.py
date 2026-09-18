@@ -11,6 +11,7 @@ reportarlas sin reentrenar.
 """
 
 import os
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,15 +71,19 @@ def _fetch_dataset():
     query = f"SELECT {', '.join(FEATURES + [TARGET])} FROM {VIEW};"
     print(f" 🔌 Conectando a {host}:{port}/{dbname}", flush=True)
 
-    with psycopg2.connect(
-        user=user,
-        password=password,
-        host=host,
-        port=port,
-        dbname=dbname,
-        connect_timeout=15,
+    # `with psycopg2.connect(...)` cierra la transaccion pero NO la conexion;
+    # closing() la libera para no dejar sesiones colgadas en el pooler.
+    with closing(
+        psycopg2.connect(
+            user=user,
+            password=password,
+            host=host,
+            port=port,
+            dbname=dbname,
+            connect_timeout=15,
+        )
     ) as connection:
-        with connection.cursor() as cursor:
+        with connection, connection.cursor() as cursor:
             cursor.execute(query)
             rows = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description]
@@ -131,6 +136,20 @@ class TrainModel:
             print(" ❌ MODELO_ENTRENADO no esta definido. Abortando.", flush=True)
             return None
 
+        # Se valida el destino antes de entrenar: el .env del repo apunta a rutas
+        # del contenedor (/app/...), asi que ejecutar esto en el host fallaria
+        # despues de varios minutos de trabajo en vez de al instante.
+        directorio = os.path.dirname(destino) or "."
+        try:
+            os.makedirs(directorio, exist_ok=True)
+        except OSError as error:
+            print(f" ❌ No se puede crear el directorio '{directorio}': {error}", flush=True)
+            print("    Revise MODELO_ENTRENADO; el .env por defecto usa rutas del contenedor.", flush=True)
+            return None
+        if not os.access(directorio, os.W_OK):
+            print(f" ❌ Sin permiso de escritura en '{directorio}'. Abortando.", flush=True)
+            return None
+
         try:
             df = _fetch_dataset()
         except Exception as error:
@@ -160,7 +179,6 @@ class TrainModel:
 
         X = df[FEATURES]
         y = df[TARGET]
-        minimo_por_clase = int(y.value_counts().min())
 
         print(
             f" 🎯 Dataset listo: {len(df)} filas · {y.nunique()} generos · "
@@ -173,7 +191,10 @@ class TrainModel:
         )
 
         # Seleccion de modelo por validacion cruzada sobre el conjunto de train.
-        cv = max(2, min(5, minimo_por_clase))
+        # El numero de folds se limita a la clase menos poblada *de train*: usar el
+        # conteo global haria que StratifiedKFold avise o falle.
+        cv = max(2, min(5, int(y_train.value_counts().min())))
+        print(f" 🔁 Validacion cruzada con cv={cv}", flush=True)
         resultados = {}
         for nombre, estimador in _candidatos().items():
             pipeline = _build_pipeline(estimador)
@@ -223,20 +244,37 @@ class TrainModel:
             f"f1_macro={metricas['f1_macro']:.4f}",
             flush=True,
         )
+        # `techo` se calcula sobre todo el dataset (in-sample) mientras que
+        # `accuracy` se mide sobre el hold-out, asi que un split favorable puede
+        # superarlo. Se reporta la relacion real en lugar de darla por supuesta,
+        # y la clave existe siempre (None si no es calculable) porque el API la
+        # publica en /api/model/info.
+        margen = None
+        if techo > baseline_accuracy:
+            margen = float(
+                (metricas["accuracy"] - baseline_accuracy) / (techo - baseline_accuracy)
+            )
+        metricas["margen_aprovechado"] = margen
+
         print(
-            f" 📐 baseline={baseline_accuracy:.4f} < modelo={metricas['accuracy']:.4f} "
-            f"<= techo={techo:.4f}",
+            f" 📐 baseline={baseline_accuracy:.4f} · modelo={metricas['accuracy']:.4f} · "
+            f"techo(in-sample)={techo:.4f}",
             flush=True,
         )
         if metricas["accuracy"] <= baseline_accuracy:
             print(" ⚠️  El modelo no supera al baseline de clase mayoritaria.", flush=True)
-        elif techo > baseline_accuracy:
-            aprovechado = (metricas["accuracy"] - baseline_accuracy) / (techo - baseline_accuracy)
-            metricas["margen_aprovechado"] = float(aprovechado)
+        elif margen is None:
+            print(" ⚠️  El techo no supera al baseline: las features no aportan senal.", flush=True)
+        else:
             print(
-                f" 🎯 El modelo aprovecha el {aprovechado:.1%} del margen que permiten las features.",
+                f" 🎯 El modelo aprovecha el {margen:.1%} del margen que permiten las features.",
                 flush=True,
             )
+            if metricas["accuracy"] > techo:
+                print(
+                    "    (por encima del techo in-sample: el split de prueba resulto favorable)",
+                    flush=True,
+                )
 
         # Reentrenamiento final sobre todos los datos disponibles.
         modelo_final = _build_pipeline(_candidatos()[mejor_nombre])

@@ -18,6 +18,24 @@ from src.contexts.api.models import PredictorRequest
 _FEATURES_POR_DEFECTO = ["tipo_correo", "proveedor_correo", "pais", "ciudad"]
 
 
+def _canonizar(valor, conocidas):
+    """Empareja `valor` con la categoria vista en entrenamiento, ignorando mayusculas.
+
+    El OneHotEncoder compara cadenas exactas, asi que "madison" no coincidiria
+    con "Madison" y se codificaria como todo ceros. Devuelve (valor_canonico,
+    es_conocido).
+    """
+    if not conocidas:
+        return valor, True  # sin catalogo no se puede afirmar que sea desconocido
+    if valor in conocidas:
+        return valor, True
+    objetivo = valor.casefold()
+    for candidato in conocidas:
+        if candidato.casefold() == objetivo:
+            return candidato, True
+    return valor, False
+
+
 class _ModelCache:
     """Cachea el bundle en memoria e invalida cuando cambia el mtime del archivo."""
 
@@ -29,9 +47,9 @@ class _ModelCache:
     def get(self):
         ruta = os.getenv("MODELO_ENTRENADO")
         if not ruta:
+            print(" ❌ MODELO_ENTRENADO no esta configurado en el entorno del API", flush=True)
             raise HTTPException(
-                status_code=503,
-                detail="MODELO_ENTRENADO no esta configurado en el entorno del API",
+                status_code=503, detail="El servicio de prediccion no esta configurado."
             )
         if not os.path.isfile(ruta):
             raise HTTPException(
@@ -45,8 +63,11 @@ class _ModelCache:
                 try:
                     self._bundle = joblib.load(ruta)
                 except Exception as error:
+                    # El detalle va al log; al cliente solo un mensaje generico,
+                    # para no exponer rutas del sistema de archivos.
+                    print(f" ❌ No se pudo cargar el modelo desde {ruta}: {error}", flush=True)
                     raise HTTPException(
-                        status_code=503, detail=f"No se pudo cargar el modelo: {error}"
+                        status_code=503, detail="El modelo no se pudo cargar."
                     )
                 self._mtime = mtime
                 print(f" 🔄 Modelo cargado desde {ruta}", flush=True)
@@ -63,7 +84,7 @@ class TrainModelController:
         # Compatibilidad: si el .pkl es un estimador suelto y no un bundle.
         if isinstance(bundle, dict):
             pipeline = bundle.get("pipeline")
-            features = bundle.get("features", _FEATURES_POR_DEFECTO)
+            features = bundle.get("features") or _FEATURES_POR_DEFECTO
             categorias = bundle.get("categorias_conocidas", {})
             metricas = bundle.get("metricas", {})
             entrenado_en = bundle.get("entrenado_en")
@@ -77,7 +98,8 @@ class TrainModelController:
             )
 
         if pipeline is None:
-            raise HTTPException(status_code=503, detail="El bundle del modelo no contiene un pipeline")
+            print(" ❌ El bundle del modelo no contiene un pipeline", flush=True)
+            raise HTTPException(status_code=503, detail="El modelo no esta disponible.")
 
         perfil = {
             "tipo_correo": request.tipo_correo.value,
@@ -86,14 +108,27 @@ class TrainModelController:
             "ciudad": request.ciudad,
         }
 
-        # Avisar cuando el perfil trae categorias que el modelo nunca vio:
-        # OneHotEncoder(handle_unknown="ignore") las codifica en ceros, asi que
-        # la prediccion sigue siendo valida pero menos informada.
-        advertencias = [
-            f"'{perfil[columna]}' no aparece en los datos de entrenamiento para '{columna}'"
-            for columna in features
-            if categorias.get(columna) and perfil.get(columna) not in categorias[columna]
-        ]
+        # El bundle manda sobre las features: si se entreno con otro conjunto, se
+        # rechaza limpiamente en vez de reventar con KeyError mas abajo.
+        faltantes = [columna for columna in features if columna not in perfil]
+        if faltantes:
+            print(f" ❌ El modelo espera features no disponibles: {faltantes}", flush=True)
+            raise HTTPException(
+                status_code=503,
+                detail="El modelo entrenado no es compatible con este API.",
+            )
+
+        # Se normaliza contra las categorias vistas en entrenamiento y se avisa de
+        # las desconocidas: OneHotEncoder(handle_unknown="ignore") las codifica en
+        # ceros, asi que la prediccion sigue siendo valida pero menos informada.
+        advertencias = []
+        for columna in features:
+            canonico, conocido = _canonizar(perfil[columna], categorias.get(columna))
+            perfil[columna] = canonico
+            if not conocido:
+                advertencias.append(
+                    f"'{canonico}' no aparece en los datos de entrenamiento para '{columna}'"
+                )
 
         entrada = pd.DataFrame([{columna: perfil[columna] for columna in features}])
 
@@ -101,17 +136,21 @@ class TrainModelController:
             prediccion = pipeline.predict(entrada)[0]
             probabilidades = pipeline.predict_proba(entrada)[0]
         except Exception as error:
-            raise HTTPException(status_code=500, detail=f"Error al predecir: {error}")
+            print(f" ❌ Error al predecir sobre {perfil}: {error}", flush=True)
+            raise HTTPException(status_code=500, detail="No se pudo generar la prediccion.")
 
+        # Se ordena por la probabilidad cruda y se redondea solo para la salida:
+        # redondear antes empataria clases y podria dejar en primer lugar un genero
+        # distinto del que devuelve predict().
         ranking = sorted(
-            (
-                {"genero": str(clase), "probabilidad": round(float(prob), 4)}
-                for clase, prob in zip(pipeline.classes_, probabilidades)
-            ),
-            key=lambda item: item["probabilidad"],
+            zip((str(clase) for clase in pipeline.classes_), (float(p) for p in probabilidades)),
+            key=lambda par: par[1],
             reverse=True,
         )
-        top = ranking[: request.top_n]
+        top = [
+            {"genero": genero, "probabilidad": round(prob, 4)}
+            for genero, prob in ranking[: request.top_n]
+        ]
 
         print(f" 🎵 {perfil} -> {prediccion}", flush=True)
 

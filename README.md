@@ -173,6 +173,11 @@ Respuesta:
 vio: la predicción sigue siendo válida (esas categorías se codifican en ceros)
 pero está menos informada.
 
+El emparejamiento de categorías **ignora mayúsculas y espacios sobrantes**:
+`"  usa "` y `"USA"` producen el mismo resultado. Sin esto, `OneHotEncoder`
+compara cadenas exactas y `"usa"` caería al vector de ceros, devolviendo la
+distribución a priori en lugar de la real.
+
 ### Campos de entrada
 
 | Campo | Tipo | Req. | Notas |
@@ -205,6 +210,21 @@ puerto 8000 esté abierto en el security group.
 | `make run-production` | Levanta en segundo plano |
 | `make logs` | Sigue los logs |
 | `make down` | Detiene todo |
+
+El contenedor corre en **UTC**, así que el reentrenamiento de las `01:00` ocurre
+a las **20:00 hora de Panamá** (UTC−5).
+
+### Limitaciones conocidas
+
+- El API se publica en **HTTP plano**, sin autenticación y con `CORS: *`. Es
+  adecuado para la entrega académica; para producción haría falta TLS y control
+  de acceso.
+- `techo_teorico` se calcula *in-sample* sobre todo el dataset, mientras que
+  `accuracy` se mide sobre el hold-out. Un split favorable puede hacer que el
+  accuracy lo supere; el entrenamiento lo reporta cuando ocurre en vez de
+  asumir la relación.
+- Si el modelo aún no existe (arranque en frío), `/api/model` y `/api/model/info`
+  devuelven **503** con un mensaje claro; `/api/health-check` sigue en 200.
 
 ### Variables de entorno (`.env`)
 
